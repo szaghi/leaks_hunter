@@ -20,7 +20,14 @@ To perform a deeper analysis of GNU gfortran [bug 80477](https://gcc.gnu.org/bug
 
 The analysis is performed by means of a very simple tests that could raise the memory leaks under different conditions:
 
-[static components intrinsic](#static_components_intrinsic) | [static components derived](#static_components_derived) | [dynamic components intrinsic](#dynamic_components_intrinsic) | [dynamic components derived](#dynamic_components_derived) | [polymorphic components](#polymorphic_components) | [complex inheritance](#complex_inheritance) | [workaround](#workaround) | [conclusions](#conclusions)
++ [static components intrinsic](#static_components_intrinsic)
++ [static components derived](#static_components_derived)
++ [dynamic components intrinsic](#dynamic_components_intrinsic)
++ [dynamic components derived](#dynamic_components_derived)
++ [polymorphic components](#polymorphic_components)
++ [complex inheritance](#complex_inheritance)
++ [workaround](#workaround)
++ [conclusions](#conclusions)
 
 To compile, run and analyze the leaks generation the scripts contained into `scripts/` directory have been used, namely:
 
