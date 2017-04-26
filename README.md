@@ -1164,8 +1164,244 @@ add_static_dynamic_intrinsic_type (struct __class_43B76E_t & restrict lhs, struc
 
 ---
 
+### multiple inheritance
+
+#### the failing of workaround
+
+It seems that there is at least one scenario where the workaround does not work:
+
+```fortran
+module ancestor_m
+implicit none
+
+type, abstract :: ancestor_t
+   integer, allocatable :: workaround
+   contains
+      generic :: assignment(=) => assign_
+      generic :: operator(+) => add_
+      procedure(assign_interface), pass(lhs), deferred :: assign_
+      procedure(add_interface),    pass(lhs), deferred :: add_
+endtype ancestor_t
+
+abstract interface
+   subroutine assign_interface(lhs, rhs)
+   ! Operator `=`.
+   import :: ancestor_t
+   class(ancestor_t), intent(inout) :: lhs
+   class(ancestor_t), intent(in)    :: rhs
+   endsubroutine assign_interface
+
+   function add_interface(lhs, rhs) result(opr)
+   ! Operator `+`.
+   import :: ancestor_t
+   class(ancestor_t), intent(in)  :: lhs
+   class(ancestor_t), intent(in)  :: rhs
+   class(ancestor_t), allocatable :: opr
+   endfunction add_interface
+endinterface
+endmodule ancestor_m
+
+module parent_m
+use ancestor_m
+implicit none
+
+type, extends(ancestor_t), abstract :: parent_t
+endtype parent_t
+endmodule parent_m
+
+module child_m
+use ancestor_m
+use parent_m
+implicit none
+
+type, extends(parent_t) :: child_t
+   integer              :: x
+   integer, allocatable :: y
+   contains
+      procedure, pass(lhs) :: assign_
+      procedure, pass(lhs) :: add_
+endtype child_t
+
+contains
+   subroutine assign_(lhs, rhs)
+   ! Operator `=`.
+   class(child_t),    intent(inout) :: lhs
+   class(ancestor_t), intent(in)    :: rhs
+
+   select type(rhs)
+   class is(child_t)
+      lhs%x = rhs%x
+      if (allocated(rhs%y)) then
+        if (.not.allocated(lhs%y)) allocate(lhs%y)
+        lhs%y = rhs%y
+      endif
+   endselect
+   endsubroutine assign_
+
+   function add_(lhs, rhs) result(opr)
+   ! Operator `+`.
+   class(child_t),    intent(in)  :: lhs
+   class(ancestor_t), intent(in)  :: rhs
+   class(ancestor_t), allocatable :: opr
+
+   allocate(child_t :: opr)
+   select type(opr)
+   class is(child_t)
+      select type(rhs)
+      class is(child_t)
+         opr%x = lhs%x + rhs%x
+         if (allocated(lhs%y).and.allocated(rhs%y)) then
+           allocate(opr%y)
+           opr%y = lhs%y + rhs%y
+         endif
+      endselect
+   endselect
+   endfunction add_
+endmodule child_m
+```
+
+###### valgrind log
+
+```
+==57470== Memcheck, a memory error detector
+==57470== Copyright (C) 2002-2015, and GNU GPL'd, by Julian Seward et al.
+==57470== Using Valgrind-3.12.0 and LibVEX; rerun with -h for copyright info
+==57470== Command: a.out
+...
+==57470== HEAP SUMMARY:
+==57470==     in use at exit: 12 bytes in 3 blocks
+==57470==   total heap usage: 25 allocs, 22 frees, 28,260 bytes allocated
+==57470==
+==57470== Searching for pointers to 3 not-freed blocks
+==57470== Checked 89,008 bytes
+==57470==
+==57470== 4 bytes in 1 blocks are still reachable in loss record 1 of 3
+==57470==    at 0x4C2AF1F: malloc (in /usr/lib/valgrind/vgpreload_memcheck-amd64-linux.so)
+==57470==    by 0x401752: MAIN__ (leaks_raiser_multiple_inheritance.f90:95)
+==57470==    by 0x4018AD: main (leaks_raiser_multiple_inheritance.f90:90)
+==57470==
+==57470== 4 bytes in 1 blocks are still reachable in loss record 2 of 3
+==57470==    at 0x4C2AF1F: malloc (in /usr/lib/valgrind/vgpreload_memcheck-amd64-linux.so)
+==57470==    by 0x401688: __child_m_MOD_assign_ (leaks_raiser_multiple_inheritance.f90:62)
+==57470==    by 0x4017D6: MAIN__ (leaks_raiser_multiple_inheritance.f90:98)
+==57470==    by 0x4018AD: main (leaks_raiser_multiple_inheritance.f90:90)
+==57470==
+==57470== 4 bytes in 1 blocks are definitely lost in loss record 3 of 3
+==57470==    at 0x4C2AF1F: malloc (in /usr/lib/valgrind/vgpreload_memcheck-amd64-linux.so)
+==57470==    by 0x401573: __child_m_MOD_add_ (leaks_raiser_multiple_inheritance.f90:81)
+==57470==    by 0x401819: MAIN__ (leaks_raiser_multiple_inheritance.f90:99)
+==57470==    by 0x4018AD: main (leaks_raiser_multiple_inheritance.f90:90)
+==57470==
+==57470== LEAK SUMMARY:
+==57470==    definitely lost: 4 bytes in 1 blocks
+==57470==    indirectly lost: 0 bytes in 0 blocks
+==57470==      possibly lost: 0 bytes in 0 blocks
+==57470==    still reachable: 8 bytes in 2 blocks
+==57470==         suppressed: 0 bytes in 0 blocks
+==57470==
+==57470== ERROR SUMMARY: 1 errors from 1 contexts (suppressed: 0 from 0)
+==57470== ERROR SUMMARY: 1 errors from 1 contexts (suppressed: 0 from 0)
+```
+
+> There is a memory leak.
+
+The generated code is
+
+```c
+add_ (struct __class_child_m_Child_t_t & restrict lhs, struct __class_ancestor_m_Ancestor_t_t & restrict rhs)
+{
+  struct __class_ancestor_m_Ancestor_t_a opr;
+
+  try
+    {
+      opr._data = 0B;
+      (struct __vtype_ancestor_m_Ancestor_t *) opr._vptr = &__vtab_ancestor_m_Ancestor_t;
+      {
+        struct __class_child_m_Child_t_t * __tmp_class_child_t;
+
+        if (opr._data != 0B)
+          {
+            _gfortran_runtime_error_at (&"At line 74 of file src/leaks_raiser_multiple_inheritance.f90"[1]{lb: 1 sz: 1}, &"Attempting to allocate already allocated variable \'%s\'"[1]{lb: 1 sz: 1}, &"opr"[1]{lb: 1 sz: 1});
+          }
+        else
+          {
+            opr._data = (struct ancestor_t *) __builtin_malloc (24);
+            if (opr._data == 0B)
+              {
+                _gfortran_os_error (&"Allocation would exceed memory limit"[1]{lb: 1 sz: 1});
+              }
+          }
+        (struct __vtype_ancestor_m_Ancestor_t *) opr._vptr = (struct __vtype_ancestor_m_Ancestor_t *) &__vtab_child_m_Child_t;
+        (void) __builtin_memcpy ((void *) opr._data, (void *) opr._vptr->_def_init, (unsigned long) opr._vptr->_size);
+        switch (opr._vptr->_hash)
+          {
+            default:;
+            if (_gfortran_is_extension_of ((struct __vtype_ancestor_m_Ancestor_t *) opr._vptr, &__vtab_child_m_Child_t))
+              {
+                __tmp_class_child_t = (struct __class_child_m_Child_t_t *) &opr;
+                {
+                  struct __class_child_m_Child_t_t * __tmp_class_child_t;
+
+                  switch (rhs->_vptr->_hash)
+                    {
+                      default:;
+                      if (_gfortran_is_extension_of ((struct __vtype_ancestor_m_Ancestor_t *) rhs->_vptr, &__vtab_child_m_Child_t))
+                        {
+                          __tmp_class_child_t = (struct __class_child_m_Child_t_t *) rhs;
+                          __tmp_class_child_t->_data->x = lhs->_data->x + __tmp_class_child_t->_data->x;
+                          if (lhs->_data->y != 0B && __tmp_class_child_t->_data->y != 0B)
+                            {
+                              if (__tmp_class_child_t->_data->y != 0B)
+                                {
+                                  _gfortran_runtime_error_at (&"At line 81 of file src/leaks_raiser_multiple_inheritance.f90"[1]{lb: 1 sz: 1}, &"Attempting to allocate already allocated variable \'%s\'"[1]{lb: 1 sz: 1}, &"__tmp_class_child_t"[1]{lb: 1 sz: 1});
+                                }
+                              else
+                                {
+                                  __tmp_class_child_t->_data->y = (integer(kind=4) *) __builtin_malloc (4);
+                                  if (__tmp_class_child_t->_data->y == 0B)
+                                    {
+                                      _gfortran_os_error (&"Allocation would exceed memory limit"[1]{lb: 1 sz: 1});
+                                    }
+                                }
+                              if (__tmp_class_child_t->_data->y != 0B) goto L.47;
+                              __tmp_class_child_t->_data->y = (integer(kind=4) *) __builtin_malloc (4);
+                              L.47:;
+                              *__tmp_class_child_t->_data->y = *lhs->_data->y + *__tmp_class_child_t->_data->y;
+                            }
+                          L.46:;
+                          L.45:;
+                        }
+                      L.44:;
+                      goto L.42;
+                    }
+                  L.42:;
+                  L.41:;
+                  L.40:;
+                }
+                L.39:;
+              }
+            L.38:;
+            goto L.36;
+          }
+        L.36:;
+        L.35:;
+        L.34:;
+      }
+      return opr;
+    }
+  finally
+    {
+      opr._data = 0B;
+    }
+}
+```
+
+---
+
 ### conclusions
 
 > + The memory leaks generation seems to be related to only the static component of derived types for **only** polymorphic result-functions;
 > + the leaks-prone of static component are inherited by children types;
-> + a possible **workaround** is to place an allocatable component (totally unused) inside types that have **only** static components **and** have polymorphic result-functions.
+> + a possible **workaround** is to include a **component with the ALLOCATABLE attribute** (even as a dummy, unused variable) in the type whose polymorphic variant is the function result that presently leads to a memory leak.
+
+However, the workaround does **not** always work, as shown by the [multiple inheritance](#multiple_inheritance) test.
