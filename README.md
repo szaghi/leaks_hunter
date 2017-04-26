@@ -27,6 +27,7 @@ The analysis is performed by means of a very simple tests that could raise the m
 + [polymorphic components](#polymorphic_components)
 + [complex inheritance](#complex_inheritance)
 + [workaround](#workaround)
++ [multiple inheritance: workaround failing](multiple_inheritance)
 + [conclusions](#conclusions)
 
 To compile, run and analyze the leaks generation the scripts contained into `scripts/` directory have been used, namely:
@@ -1394,6 +1395,384 @@ add_ (struct __class_child_m_Child_t_t & restrict lhs, struct __class_ancestor_m
       opr._data = 0B;
     }
 }
+```
+
+The failing test can be even reduced trimming out abstracts and to one level of inheritance:
+
+```fortran
+module parent_m
+implicit none
+
+type :: parent_t
+   integer, allocatable :: workaround
+endtype parent_t
+endmodule parent_m
+
+module child_m
+use parent_m
+implicit none
+
+type, extends(parent_t) :: child_t
+   integer              :: x
+   integer, allocatable :: y
+   contains
+      generic :: assignment(=) => assign_
+      generic :: operator(+) => add_
+      procedure, pass(lhs) :: assign_
+      procedure, pass(lhs) :: add_
+endtype child_t
+
+contains
+   subroutine assign_(lhs, rhs)
+   ! Operator `=`.
+   class(child_t),  intent(inout) :: lhs
+   class(parent_t), intent(in)    :: rhs
+
+   select type(rhs)
+   class is(child_t)
+      lhs%x = rhs%x
+      if (allocated(rhs%y)) then
+        if (.not.allocated(lhs%y)) allocate(lhs%y)
+        lhs%y = rhs%y
+      endif
+   endselect
+   endsubroutine assign_
+
+   function add_(lhs, rhs) result(opr)
+   ! Operator `+`.
+   class(child_t),  intent(in)  :: lhs
+   class(parent_t), intent(in)  :: rhs
+   class(parent_t), allocatable :: opr
+
+   allocate(child_t :: opr)
+   select type(opr)
+   class is(child_t)
+      select type(rhs)
+      class is(child_t)
+         opr%x = lhs%x + rhs%x
+         if (allocated(lhs%y).and.allocated(rhs%y)) then
+           allocate(opr%y)
+           opr%y = lhs%y + rhs%y
+         endif
+      endselect
+   endselect
+   endfunction add_
+endmodule child_m
+```
+
+###### valgrind log
+
+```
+==5050== Memcheck, a memory error detector
+==5050== Copyright (C) 2002-2015, and GNU GPL'd, by Julian Seward et al.
+==5050== Using Valgrind-3.12.0 and LibVEX; rerun with -h for copyright info
+==5050== Command: a.out
+...
+==5050== HEAP SUMMARY:
+==5050==     in use at exit: 12 bytes in 3 blocks
+==5050==   total heap usage: 25 allocs, 22 frees, 28,260 bytes allocated
+==5050==
+==5050== Searching for pointers to 3 not-freed blocks
+==5050== Checked 89,008 bytes
+==5050==
+==5050== 4 bytes in 1 blocks are still reachable in loss record 1 of 3
+==5050==    at 0x4C2AF1F: malloc (in /usr/lib/valgrind/vgpreload_memcheck-amd64-linux.so)
+==5050==    by 0x4013D4: MAIN__ (leaks_raiser_multiple_inheritance_simple.f90:66)
+==5050==    by 0x40152F: main (leaks_raiser_multiple_inheritance_simple.f90:61)
+==5050==
+==5050== 4 bytes in 1 blocks are still reachable in loss record 2 of 3
+==5050==    at 0x4C2AF1F: malloc (in /usr/lib/valgrind/vgpreload_memcheck-amd64-linux.so)
+==5050==    by 0x40130A: __child_m_MOD_assign_ (leaks_raiser_multiple_inheritance_simple.f90:33)
+==5050==    by 0x401458: MAIN__ (leaks_raiser_multiple_inheritance_simple.f90:69)
+==5050==    by 0x40152F: main (leaks_raiser_multiple_inheritance_simple.f90:61)
+==5050==
+==5050== 4 bytes in 1 blocks are definitely lost in loss record 3 of 3
+==5050==    at 0x4C2AF1F: malloc (in /usr/lib/valgrind/vgpreload_memcheck-amd64-linux.so)
+==5050==    by 0x4011F5: __child_m_MOD_add_ (leaks_raiser_multiple_inheritance_simple.f90:52)
+==5050==    by 0x40149B: MAIN__ (leaks_raiser_multiple_inheritance_simple.f90:70)
+==5050==    by 0x40152F: main (leaks_raiser_multiple_inheritance_simple.f90:61)
+==5050==
+==5050== LEAK SUMMARY:
+==5050==    definitely lost: 4 bytes in 1 blocks
+==5050==    indirectly lost: 0 bytes in 0 blocks
+==5050==      possibly lost: 0 bytes in 0 blocks
+==5050==    still reachable: 8 bytes in 2 blocks
+==5050==         suppressed: 0 bytes in 0 blocks
+==5050==
+==5050== ERROR SUMMARY: 1 errors from 1 contexts (suppressed: 0 from 0)
+==5050== ERROR SUMMARY: 1 errors from 1 contexts (suppressed: 0 from 0)
+```
+
+> The leaks are the same of above: the allocatable `child_t%y` generates leaks.
+
+The generated code is
+
+```c
+add_ (struct __class_child_m_Child_t_t & restrict lhs, struct __class_parent_m_Parent_t_t & restrict rhs)
+{
+  struct __class_parent_m_Parent_t_a opr;
+
+  try
+    {
+      opr._data = 0B;
+      (struct __vtype_parent_m_Parent_t *) opr._vptr = &__vtab_parent_m_Parent_t;
+      {
+        struct __class_child_m_Child_t_t * __tmp_class_child_t;
+
+        if (opr._data != 0B)
+          {
+            _gfortran_runtime_error_at (&"At line 45 of file src/leaks_raiser_multiple_inheritance_simple.f90"[1]{lb: 1 sz: 1}, &"Attempting to allocate already allocated variable \'%s\'"[1]{lb: 1 sz: 1}, &"opr"[1]{lb: 1 sz: 1});
+          }
+        else
+          {
+            opr._data = (struct parent_t *) __builtin_malloc (24);
+            if (opr._data == 0B)
+              {
+                _gfortran_os_error (&"Allocation would exceed memory limit"[1]{lb: 1 sz: 1});
+              }
+          }
+        (struct __vtype_parent_m_Parent_t *) opr._vptr = (struct __vtype_parent_m_Parent_t *) &__vtab_child_m_Child_t;
+        (void) __builtin_memcpy ((void *) opr._data, (void *) opr._vptr->_def_init, (unsigned long) opr._vptr->_size);
+        switch (opr._vptr->_hash)
+          {
+            default:;
+            if (_gfortran_is_extension_of ((struct __vtype_parent_m_Parent_t *) opr._vptr, &__vtab_child_m_Child_t))
+              {
+                __tmp_class_child_t = (struct __class_child_m_Child_t_t *) &opr;
+                {
+                  struct __class_child_m_Child_t_t * __tmp_class_child_t;
+
+                  switch (rhs->_vptr->_hash)
+                    {
+                      default:;
+                      if (_gfortran_is_extension_of ((struct __vtype_parent_m_Parent_t *) rhs->_vptr, &__vtab_child_m_Child_t))
+                        {
+                          __tmp_class_child_t = (struct __class_child_m_Child_t_t *) rhs;
+                          __tmp_class_child_t->_data->x = lhs->_data->x + __tmp_class_child_t->_data->x;
+                          if (lhs->_data->y != 0B && __tmp_class_child_t->_data->y != 0B)
+                            {
+                              if (__tmp_class_child_t->_data->y != 0B)
+                                {
+                                  _gfortran_runtime_error_at (&"At line 52 of file src/leaks_raiser_multiple_inheritance_simple.f90"[1]{lb: 1 sz: 1}, &"Attempting to allocate already allocated variable \'%s\'"[1]{lb: 1 sz: 1}, &"__tmp_class_child_t"[1]{lb: 1 sz: 1});
+                                }
+                              else
+                                {
+                                  __tmp_class_child_t->_data->y = (integer(kind=4) *) __builtin_malloc (4);
+                                  if (__tmp_class_child_t->_data->y == 0B)
+                                    {
+                                      _gfortran_os_error (&"Allocation would exceed memory limit"[1]{lb: 1 sz: 1});
+                                    }
+                                }
+                              if (__tmp_class_child_t->_data->y != 0B) goto L.34;
+                              __tmp_class_child_t->_data->y = (integer(kind=4) *) __builtin_malloc (4);
+                              L.34:;
+                              *__tmp_class_child_t->_data->y = *lhs->_data->y + *__tmp_class_child_t->_data->y;
+                            }
+                          L.33:;
+                          L.32:;
+                        }
+                      L.31:;
+                      goto L.29;
+                    }
+                  L.29:;
+                  L.28:;
+                  L.27:;
+                }
+                L.26:;
+              }
+            L.25:;
+            goto L.23;
+          }
+        L.23:;
+        L.22:;
+        L.21:;
+      }
+      return opr;
+    }
+  finally
+    {
+      opr._data = 0B;
+    }
+}
+```
+
+#### Note
+
+Probably, the failing of workaround is somehow related to the `child_t` finalizer. The code generated is
+
+```c
+__final_child_m_Child_t (struct array7_child_t & restrict array, integer(kind=8) byte_stride, logical(kind=1) fini_coarray)
+{
+  void * restrict D.3555;
+  void * restrict D.3559;
+  integer(kind=8) idx;
+  integer(kind=8) idx2;
+  integer(kind=4) ignore;
+  logical(kind=4) is_contiguous;
+  integer(kind=8) nelem;
+  integer(kind=8) offset;
+  struct child_t * ptr2;
+  integer(kind=8) ubound.0;
+  integer(kind=8) size.1;
+  integer(kind=8)[0:D.3556] * restrict sizes;
+  integer(kind=8) ubound.2;
+  integer(kind=8) size.3;
+  integer(kind=8)[0:D.3552] * restrict strides;
+  integer(kind=4) __result___final_child_m_Chil;
+  integer(kind=8) D.3552;
+  bitsizetype D.3553;
+  sizetype D.3554;
+  integer(kind=8) D.3556;
+  bitsizetype D.3557;
+  sizetype D.3558;
+
+  try
+    {
+      ubound.0 = (integer(kind=8)) (integer(kind=4)) array->dtype & 7;
+      size.1 = ubound.0 + 1;
+      size.1 = MAX_EXPR <size.1, 0>;
+      D.3556 = size.1 + -1;
+      D.3557 = (bitsizetype) (sizetype) NON_LVALUE_EXPR <size.1> * 64;
+      D.3558 = (sizetype) NON_LVALUE_EXPR <size.1> * 8;
+      D.3559 = (void * restrict) __builtin_malloc (MAX_EXPR <(unsigned long) (size.1 * 8), 1>);
+      sizes = (integer(kind=8)[0:D.3556] * restrict) D.3559;
+      ubound.2 = (integer(kind=8)) (integer(kind=4)) array->dtype & 7;
+      size.3 = NON_LVALUE_EXPR <ubound.2>;
+      size.3 = MAX_EXPR <size.3, 0>;
+      D.3552 = size.3 + -1;
+      D.3553 = (bitsizetype) (sizetype) NON_LVALUE_EXPR <size.3> * 64;
+      D.3554 = (sizetype) NON_LVALUE_EXPR <size.3> * 8;
+      D.3555 = (void * restrict) __builtin_malloc (MAX_EXPR <(unsigned long) (size.3 * 8), 1>);
+      strides = (integer(kind=8)[0:D.3552] * restrict) D.3555;
+      __result___final_child_m_Chil = 0;
+      is_contiguous = 1;
+      (*sizes)[0] = 1;
+      {
+        integer(kind=8) D.3527;
+
+        D.3527 = (integer(kind=8)) (integer(kind=4)) array->dtype & 7;
+        idx = 1;
+        if (idx <= D.3527)
+          {
+            while (1)
+              {
+                {
+                  logical(kind=4) D.3532;
+
+                  (*strides)[NON_LVALUE_EXPR <idx> + -1] = array->dim[idx + -1].stride;
+                  {
+                    struct array7_child_t * D.3530;
+
+                    D.3530 = (struct array7_child_t *) array;
+                    (*sizes)[idx] = (*sizes)[idx + -1] * MAX_EXPR <(D.3530->dim[idx + -1].ubound - D.3530->dim[idx + -1].lbound) + 1, 0>;
+                  }
+                  if ((*strides)[NON_LVALUE_EXPR <idx> + -1] != (*sizes)[idx + -1])
+                    {
+                      is_contiguous = 0;
+                    }
+                  L.3:;
+                  L.1:;
+                  D.3532 = idx == D.3527;
+                  idx = idx + 1;
+                  if (D.3532) goto L.2;
+                }
+              }
+          }
+        L.2:;
+      }
+      nelem = (*sizes)[(integer(kind=8)) (integer(kind=4)) array->dtype & 7] + -1;
+      {
+        integer(kind=8) D.3533;
+
+        D.3533 = nelem;
+        idx = 0;
+        if (idx <= D.3533)
+          {
+            while (1)
+              {
+                {
+                  logical(kind=4) D.3551;
+
+                  {
+                    integer(kind=8) D.3540;
+                    void * D.3541;
+                    void * D.3542;
+                    static integer(kind=8) C.3543 = 0;
+                    integer(kind=8) D.3544;
+                    integer(kind=8) D.3545;
+                    integer(kind=8) transfer.4;
+
+                    offset = 0;
+                    {
+                      integer(kind=8) D.3536;
+
+                      D.3536 = (integer(kind=8)) (integer(kind=4)) array->dtype & 7;
+                      idx2 = 1;
+                      if (idx2 <= D.3536)
+                        {
+                          while (1)
+                            {
+                              {
+                                logical(kind=4) D.3539;
+
+                                offset = ((idx % (*sizes)[idx2]) / (*sizes)[idx2 + -1]) * (*strides)[NON_LVALUE_EXPR <idx2> + -1] + offset;
+                                L.6:;
+                                D.3539 = idx2 == D.3536;
+                                idx2 = idx2 + 1;
+                                if (D.3539) goto L.7;
+                              }
+                            }
+                        }
+                      L.7:;
+                    }
+                    offset = offset * byte_stride;
+                    D.3541 = (void *) array->data;
+                    D.3542 = D.3541;
+                    D.3540 = 8;
+                    D.3544 = 8;
+                    __builtin_memcpy ((void *) &transfer.4, (void *) &D.3542, (unsigned long) MAX_EXPR <MIN_EXPR <D.3544, D.3540>, 0>);
+                    ptr2 = (struct child_t *) (transfer.4 + offset);
+                    if (ptr2 != 0B)
+                      {
+                        {
+                          integer(kind=4) stat.5;
+
+                          if (ptr2->y == 0B)
+                            {
+                              stat.5 = 1;
+                            }
+                          else
+                            {
+                              __builtin_free ((void *) ptr2->y);
+                              stat.5 = 0;
+                            }
+                          ptr2->y = 0B;
+                          if (stat.5 != 0) goto L.9;
+                          L.9:;
+                          ignore = stat.5;
+                        }
+                      }
+                    L.8:;
+                  }
+                  L.4:;
+                  D.3551 = idx == D.3533;
+                  idx = idx + 1;
+                  if (D.3551) goto L.5;
+                }
+              }
+          }
+        L.5:;
+      }
+      __final_parent_m_Parent_t ((struct array7_child_t *) array, byte_stride, fini_coarray);
+      return __result___final_child_m_Chil;
+    }
+  finally
+    {
+      __builtin_free ((void *) strides);
+      __builtin_free ((void *) sizes);
+    }
+}
+
 ```
 
 ---
